@@ -20,7 +20,6 @@ scores = cross_val_score(#network
                          #5-fold  
                          cv=5                  
                          )
-
 # 輸出5次準確率分數和平均準確率分數
 print('Scores:', scores)
 print('Mean Accuracy:', scores.mean())
