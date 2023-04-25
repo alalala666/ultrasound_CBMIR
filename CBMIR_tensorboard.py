@@ -7,7 +7,7 @@
 #--------------------------------------------------------
 #                       import
 #--------------------------------------------------------
-
+from sklearn.model_selection import KFold
 import torch
 import os , csv, json
 import torchvision
@@ -39,8 +39,6 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np 
 
-
-
 class CBMIR():
     '''
     train + get_Feature+ retrieve
@@ -53,7 +51,8 @@ class CBMIR():
 
     auto_train()可以自動訓練。
     retrieve() 可以自動檢索。
-    train_model() 用來做單次訓練。    
+    train_model() 用來做單次訓練。
+    train_model_no_serise() 用來做單次kfold訓練。       
     '''
     def __init__(self,repeat_times = 0):
   
@@ -68,6 +67,7 @@ class CBMIR():
         self.K = int
         self.repeat_times = repeat_times
         self.split_82 = True
+
 
     def train_model(self,model_name = str,num_epochs = int,batch_size = int ,pretrain = bool ,train_path = str,test_path = str,save_path= str,fold= int):
         def model_choose(model_name=str,num_classes=int,pretrain=bool):
@@ -628,25 +628,575 @@ class CBMIR():
         return a,b,specificity,sensitivity,ppv,npv,auc
 
 
+    def train_model_no_serise(self,model_name = str,num_epochs = int,batch_size = int ,pretrain = bool ,data_path = str,save_path= str,fold= int):
+        '''
+        \ntrain_model_no_serise
+        EX:
+            cb.train_model_no_serise(model_name = 'densenet',\n
+                                    \tnum_epochs = 2,\n
+                                    \tbatch_size = 16, \n
+                                    \tpretrain = True,\n
+                                    \tdata_path = 'data\S',\n
+                                    \tsave_path= '20',\n
+                                    \tfold= cb.K)
+        '''
+        
+        
+        def model_choose(model_name=str,num_classes=int,pretrain=bool):
+            '''
+            宣告model 
+            NetWork有:
+                DenseNet -> 'densenet'
+                Vision Transformer  -> 'vit'
+                Swin Transformer -> 'swin_vit'
+                用str的方式輸入。
+            '''
+            def vit_model(num_classes=int,pretrain=bool):
+                # Download pretrained ViT weights and model
+                if pretrain:
+                    vit_weights = torchvision.models.ViT_B_16_Weights.DEFAULT # "DEFAULT" means best available
+                else:
+                    vit_weights = False
+
+                pretrained_vit = torchvision.models.vit_b_16(weights=vit_weights)
+                
+                # Freeze all layers in pretrained ViT model 
+                for param in pretrained_vit.parameters():
+                    param.requires_grad = True
+               
+                # Update the preatrained ViT head 
+                embedding_dim = 768 # ViT_Base 16*16*3=768
+                pretrained_vit.heads = nn.Linear(in_features=embedding_dim,out_features=num_classes)
+                    
+                model = pretrained_vit
+                return model
+        
+
+            def swin_model(num_classes=int,pretrain=False):
+                #載入預訓練參數
+                if pretrain:
+                    vit_weights = torchvision.models.Swin_B_Weights.DEFAULT
+                    vit_weights = torchvision.models.Swin_V2_B_Weights
+                else:
+                    vit_weights = None
+                
+                print(vit_weights)
+                #model = torchvision.models.swin_b(weights=vit_weights)
+                model = torchvision.models.swin_v2_b(weights=vit_weights)
+                #torchvision.models.swin_b(weights=torchvision.models.Swin_B_Weights.DEFAULT)
+                #begin = nn.Sequential(*list(model.features.children())[0:4])
+                # Freeze all layers in pretrained ViT model 
+                for param in model.parameters():
+                    param.requires_grad = True
+
+                embedding_dim = 1024 # 根據SWIN_VIT版本不同而改變 S-> 768 B->1024
+                model.head = nn.Linear(in_features=embedding_dim,out_features=num_classes)
+                
+                return model
+        
+
+            def densenet201(num_classes,pretrain=False):
+                densenet201 = torchvision.models.densenet201(pretrained=pretrain)
+                for param in densenet201.parameters():
+                        param.requires_grad = True
+                densenet201.classifier = nn.Linear(1920, num_classes)
+                # densenet201.relu = nn.ReLU(inplace = True)
+                # densenet201.fc2 = nn.Linear(1920, num_classes)
+                #densenet201 = torch.load('ForBuddy_ori\\finetune\Hole\densenet\\3.pth')
+                return densenet201
+            
+            
+            def efficientnet(num_classes,pretrain=bool):
+                #weights = torchvision.models.efficientnet_v2_s
+                efficientnet = torchvision.models.efficientnet_v2_l(weights=pretrain)
+                efficientnet.classifier = nn.Sequential(
+                        nn.Dropout(p=0.3, inplace=True),
+                        nn.Linear(1280, num_classes),
+                    )
+                print(efficientnet)
+                #print("vcbncvbncvbncvbnvbn")
+                return efficientnet
+        
+            #global model
+            if model_name == "vit":
+                model = vit_model(num_classes, pretrain)
+            elif model_name == "swin_vit":
+                model = swin_model(num_classes, pretrain)
+            elif model_name == "densenet":
+                model = densenet201(num_classes, pretrain)
+            elif model_name == "efficientnet":
+                model = efficientnet(num_classes, pretrain)
+            #print(model)
+            return model
+
+
+        def train(train_loader, model, criterion, epoch, num_epochs, batch_size):
+            model.train()
+            total_train = 0
+            correct_train = 0
+            train_loss = 0
+
+            lr = 0.01 #* (1/2)
+
+            optimizer = optim.SGD(model.parameters(), lr= lr)
+            # from torch.optim.lr_scheduler import StepLR
+            # scheduler = StepLR(optimizer, step_size=10, gamma=0.1)
+            # 定义损失函数和优化器
+
+            #optimizer = optim.Adam(model.parameters(),lr= lr)
+            #optimizer = torch.optim.Adam(model.parameters(), lr=0.001, betas=(0.9, 0.999), eps=1e-08, weight_decay=0, amsgrad=False)
+
+            count = 0
+            for batch_idx, (data, target) in enumerate(train_loader):
+                model.train()
+                data = Variable(data)
+                target = Variable(target)
+                if torch.cuda.is_available():
+                    data, target = data.cuda(), target.cuda()
+
+                # clear gradient
+                optimizer.zero_grad()
+
+                # Forward propagation
+                output = model(data) 
+                loss = criterion(output, target) 
+
+                # Calculate gradients
+                loss.backward()
+                
+                # Update parameters
+                optimizer.step()
+
+                predicted = torch.max(output.data, 1)[1]
+                total_train += len(target)
+                correct_train += sum((predicted == target).float())
+                train_loss += loss.item()
+
+                if batch_idx % 1 == 0:
+                    print("Train Epoch: {}/{} [iter： {}/{}], acc： {:.6f}, loss： {:.6f}".format(
+                    epoch+1, num_epochs, batch_idx+1, len(train_loader),
+                    correct_train / float((batch_idx + 1) * batch_size),
+                    train_loss / float((batch_idx + 1) * batch_size)))
+                count+=1
+                if count == 29999:#5000
+                    break
+            #scheduler.step()        
+            train_acc_ = 100 * (correct_train / float(total_train))
+
+            # print(train_acc_.item(),type(train_acc_.item()))
+            # print(a)
+            train_loss_ = train_loss / total_train
+                            
+            return train_acc_.item(), train_loss_
+
+
+        def validate(valid_loader, model, criterion, epoch, num_epochs, batch_size): 
+            roc_predicted = None
+            roc_target = None
+            model.eval()
+            total_valid = 0
+            correct_valid = 0
+            valid_loss = 0
+            total_auc = 0
+            total_specificity=0
+            total_sensitivity=0
+            total_ppv=0
+            total_npv=0
+            top1_correct = 0
+            top5_correct = 0
+            y_true = []
+            y_scores = []
+            count = 0
+            for batch_idx, (data, target) in enumerate(valid_loader):
+                #count += 1
+                model.eval()
+                data, target = Variable(data), Variable(target) 
+                
+                if torch.cuda.is_available():
+                    data, target = data.cuda(), target.cuda()
+
+                output = model(data)
+                loss = criterion(output, target) 
+
+                predict = torch.softmax(output, dim=1) 
+                predict = torch.max(output.data, 1)[1]
+
+                total_valid += len(target)
+                correct_valid += sum((predict == target).float())
+
+                
+                y_true.extend(target.tolist())
+                y_scores.extend(predict.tolist())
+                
+                valid_loss += loss.item()
+
+                if batch_idx % 1 == 0:
+                    count+=1
+                    print("Valid Epoch: {}/{} [iter： {}/{}], acc： {:.6f}, loss： {:.6f}".format(
+                    epoch+1, num_epochs, batch_idx+1, len(valid_loader),
+                    correct_valid / float((batch_idx + 1) * batch_size),
+                    valid_loss / float((batch_idx + 1) * batch_size)))
+                
+                ##########################################################################
+                # AUC compute
+                ##########################################################################
+                '''
+                https://torchmetrics.readthedocs.io/en/stable/classification/auroc.html
+                #from torchmetrics.functional.classification import multiclass_auroc
+                '''
+                auc = multiclass_auroc(output, target, num_classes=num_classes, average="macro", thresholds=None)
+                total_auc += auc
+                # print(auc)
+                # from sklearn.metrics import roc_auc_score
+                # auc = roc_auc_score(target.cpu().numpy(), predicted.cpu().numpy(),multi_class='ovo')
+                # print("AUC:", auc)
+
+
+                ##########################################################################
+                # Sspecificity compute
+                ##########################################################################
+                '''
+                https://torchmetrics.readthedocs.io/en/stable/classification/sspecificity.html
+                '''
+                #from torchmetrics.classification import MulticlassSspecificity
+                from torchmetrics.classification import MulticlassSpecificity
+                mcs = MulticlassSpecificity(num_classes=num_classes,average="micro").to(device)
+                a = mcs(predict, target)
+                total_specificity += a
+                #print(a)
+                #print('Sspecificity : ',a)
+
+                
+                ##########################################################################
+                # sensitivity
+                ##########################################################################
+                from sklearn.metrics import recall_score
+                from torchmetrics import classification
+                #sensitivity = classification.F1Score(predict, target, average='multiclass')
+                recall = classification.MulticlassRecall(num_classes) 
+                sensitivity =  recall(predict.cpu(), target.cpu())
+                #sensitivity = recall_score(target.cpu().numpy(), predict.cpu().numpy(),average='macro')
+                #print(sensitivity)
+                #print(asdasd)
+                total_sensitivity += sensitivity
+
+
+                ##########################################################################
+                # PPV NPV
+                ##########################################################################
+                # import sklearn.metrics as metrics
+                # #print((target.cpu().numpy()))
+                # a = torch.tensor(((target.cpu().numpy())))
+                # b = torch.tensor(((predict.cpu().numpy())))
+                # #print(a,b)
+                # #cm = metrics.confusion_matrix((a),predicted.cpu().numpy())
+                # # 计算PPV和NPV
+                # true_positives = (b * a).sum()
+                # predicted_positives = b.sum()
+                # PPV = true_positives / predicted_positives
+                # # PPV = cm[1, 1] / (cm[1, 1] + cm[0, 1])
+                # true_negatives = ((1-a) * (1-b)).sum()
+                # predicted_negatives = (1-b).sum()
+                # NPV =  true_negatives / predicted_negatives
+                # NPV = cm[0, 0] / (cm[0, 0] + cm[1, 0])
+                #(predict.cpu(), target.cpu())
+                precision = torchmetrics.functional.classification.multiclass_precision(predict.cpu(), target.cpu(), num_classes) 
+                recall = torchmetrics.functional.classification.multiclass_recall(predict.cpu(), target.cpu(), num_classes) 
+                total_ppv +=  torch.tensor(precision)#PPV
+                total_npv += torch.tensor(recall)#NPV
+               # print("PPV:", precision,recall)
+                #print(aaaaa)
+                # #print(count)
+                if count >= 29999:#2000
+                    break
+            #print(total_auc,count,float(total_auc)/count)
+            #assert False
+            valid_acc_ = 100 * (correct_valid / float(total_valid))
+            valid_loss_ = valid_loss / total_valid
+            total_auc = total_auc/count
+            total_specificity = total_specificity / count
+            total_sensitivity = total_sensitivity / count
+            total_ppv = total_ppv / count
+            total_npv = total_npv/ count
+            #print(str(float(total_sensitivity))[:5])
+            total_auc = 100 *float("{:.2f}".format(total_auc))
+            total_specificity =100 *float( "{:.2f}".format(total_specificity))
+            total_sensitivity = 100 *float("{:.2f}".format(total_sensitivity))
+            total_ppv = 100 *float("{:.2f}".format(total_ppv))
+            total_npv =100 *float( "{:.2f}".format(total_npv))
+
+    
+            #print(top5_correct/self.batch_size)
+            #assert False
+            #print(roc_target.shape,roc_predicted.shape)
+            from sklearn.metrics import roc_curve, auc
+            #fpr, tpr, thresholds = roc_curve(y_true= roc_target.cpu(), y_score= roc_predicted.cpu())
+            try:
+                fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+                roc_auc = auc(fpr, tpr)
+                
+                # 绘制 ROC 曲线
+                import matplotlib.pyplot as plt
+                plt.figure()
+                lw = 2
+                plt.plot(fpr, tpr, color='darkorange',
+                        lw=lw, label='ROC curve (area = %0.2f)' % roc_auc)
+                plt.plot([0, 1], [0, 1], color='navy', lw=lw, linestyle='--')
+                plt.xlim([0.0, 1.0])
+                plt.ylim([0.0, 1.05])
+                plt.xlabel('False Positive Rate')
+                plt.ylabel('True Positive Rate')
+                plt.title('Receiver operating characteristic')
+                plt.legend(loc="lower right")
+            #plt.show()
+                if not os.path.exists(save_path + '\\' + str(fold)):
+                    os.makedirs(save_path + '\\' + str(fold))
+                plt.savefig(save_path + '\\' + str(fold) + '\\'+str(epoch)+'_ROC.png')
+                plt.clf()
+                # print(fpr, tpr)
+                # print(roc_auc)
+            except:
+                print('end')
+            #assert False
+            return valid_acc_.item(), valid_loss_,total_auc,total_specificity,total_sensitivity,total_ppv,total_npv
+
+
+        def training_loop(model, criterion, train_loader, valid_loader, seconds, csv_name, num_epochs, batch_size,fold,save_path):
+            # set objects for storing metrics
+            maxx = 0
+            ccount = 0
+            total_train_loss = []
+            total_valid_loss = []
+            total_train_accuracy = []
+            total_valid_accuracy = []
+            training_accuracy = []
+            valid_accuracy = []
+            auc = []
+            specificity = []
+            sensitivity = []
+            ppv = []
+            npv = []
+            CUDA = torch.cuda.is_available()
+            device = torch.device("cuda" if CUDA else "cpu")
+            # Train model
+            for epoch in range(num_epochs):
+                # training
+                train_acc_, train_loss_ = train(train_loader, model, criterion, epoch, num_epochs, batch_size)
+                total_train_loss.append(train_loss_)
+                total_train_accuracy.append(train_acc_)
+                formatted = "{:.2f}".format(train_acc_)
+                training_accuracy.append(float(formatted))
+                
+
+
+                # validation
+                with torch.no_grad():
+                    valid_acc_, valid_loss_,total_auc,total_specificity,total_sensitivity,total_ppv,total_npv= validate(valid_loader , model, criterion, epoch,num_epochs, batch_size)
+                    #print(valid_acc_, valid_loss_,total_auc,total_specificity,total_sensitivity,total_ppv,total_npv)
+                    #
+                    # print(total_auc)
+                    # assert False
+                    # ##自動停止
+                    # if maxx == 0:
+                    #     maxx =valid_acc_
+                    # elif valid_acc_ > maxx:
+                    #     maxx = valid_acc_
+                    # else :
+                    #     ccount = ccount + 1
+                    # if ccount == 3:
+                    #     return total_train_loss, total_valid_loss, total_train_accuracy, total_valid_accuracy
+
+                    total_valid_loss.append(valid_loss_)
+                    total_valid_accuracy.append(valid_acc_)
+                    formatted = "{:.2f}".format(valid_acc_)
+                    valid_accuracy.append(float(formatted))
+                    auc.append(total_auc)
+                    specificity.append(total_specificity)
+                    sensitivity.append(total_sensitivity)
+                    ppv.append(total_ppv)
+                    npv.append(total_npv)
+
+                #算時間
+                now_time = int(time.time()-seconds)
+                hr = 0
+                mi = 0
+                sec = 0
+                while(now_time>3600):
+                    now_time = now_time - 3600
+                    hr = hr + 1
+                while(now_time>60):
+                    now_time = now_time - 60
+                    mi = mi + 1
+                sec = now_time
+                if hr < 10:
+                    hr = "0"+str(hr)
+                else:
+                    hr = str(hr)
+                if mi < 10:
+                    mi = "0"+str(mi)
+                else:
+                    mi = str(mi)
+                if sec < 10:
+                    sec = "0"+str(sec)
+                else:
+                    sec = str(sec)
+                cost_time = hr + ":" + mi + ":" +sec
+
+
+                print('================================================================================================================================')
+                print("Epoch: {}/{}， Train acc： {:.6f}， Train loss： {:.6f}， Valid acc： {:.6f}， Valid loss： {:.6f}， Time： {}".format(
+                    epoch+1, num_epochs, 
+                    train_acc_, train_loss_,
+                    valid_acc_, valid_loss_,cost_time))
+                print('================================================================================================================================')
+                #寫入訓練資料
+                print(epoch,num_epochs)
+                if epoch == num_epochs-1:
+                    # with open(csv_name, 'a+', newline='') as csvfile:
+                    #     writer = csv.writer (csvfile)
+                    #     writer.writerow(["fold", "num_epochs", 
+                    #         (str("train_acc_")),
+                    #         (str("train_loss_")),
+                    #         (str("valid_acc_")),
+                    #         (str("valid_loss_")),"specificity","sensitivity","auc",
+                    #         "cost_time"])
+                    with open(csv_name, 'a+', newline='') as csvfile:
+                        writer = csv.writer (csvfile)
+                        writer.writerow([fold, num_epochs, 
+                            (str(train_acc_)),
+                            (str(train_loss_))[:7],
+                            (str(valid_acc_)),
+                            (str(valid_loss_))[:7],specificity[-1],sensitivity[-1],auc[-1],
+                            cost_time])
+
+            print("====== END ==========")
+            print(training_accuracy,valid_accuracy,auc,specificity,sensitivity,npv,ppv)
+
+            #assert False#total_sensitivity,total_ppv,total_npv
+            # 畫出訓練準確率和測試準確率的折線圖
+            import matplotlib.pyplot as plt
+            from matplotlib.ticker import MaxNLocator
+            #print(training_accuracy,valid_accuracy)
+            plt.plot(range(1, num_epochs+1),training_accuracy, label='Train Accuracy')
+            plt.plot(range(1, num_epochs+1),valid_accuracy, label='Test Accuracy')
+            plt.plot(range(1, num_epochs+1),auc, label='auc')
+            plt.plot(range(1, num_epochs+1),specificity, label='specificity')
+            plt.plot(range(1, num_epochs+1),sensitivity, label='sensitivity')
+            plt.plot(range(1, num_epochs+1),ppv, label='ppv')
+            plt.plot(range(1, num_epochs+1),npv, label='npv')
+            plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+            plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
+            # 設定 X 軸標籤
+            plt.xlabel('Epoch')
+            # 設定 Y 軸標籤
+            plt.ylabel('Accuracy')
+            # 設定圖形標題
+            plt.title('Train and Test Accuracy')
+            # 加入圖例
+            plt.legend()
+            # 顯示圖形
+            #plt.show()
+            if not os.path.exists(save_path + '\\' + str(fold)):
+                os.makedirs(save_path + '\\' + str(fold))
+            plt.savefig(save_path + '\\' + str(fold) + '\\figure.png')
+            plt.clf()
+                        #assert False#total_sensitivity,total_ppv,total_npv
+            # 畫出訓練準確率和測試準確率的折線圖
+            import matplotlib.pyplot as plt
+            from matplotlib.ticker import MaxNLocator
+            plt.plot(range(1, num_epochs+1),training_accuracy, label='Train Accuracy')
+            plt.plot(range(1, num_epochs+1),valid_accuracy, label='Test Accuracy')
+            plt.plot(range(1, num_epochs+1),auc, label='auc')
+            plt.plot(range(1, num_epochs+1),specificity, label='specificity')
+            plt.plot(range(1, num_epochs+1),sensitivity, label='sensitivity')
+            # plt.plot(range(1, num_epochs+1),ppv, label='ppv')
+            # plt.plot(range(1, num_epochs+1),npv, label='npv')
+            plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+            plt.gca().yaxis.set_major_locator(MaxNLocator(integer=True))
+            # 設定 X 軸標籤
+            plt.xlabel('Epoch')
+            # 設定 Y 軸標籤
+            plt.ylabel('Accuracy')
+            # 設定圖形標題
+            plt.title('Train and Test Accuracy')
+            # 加入圖例
+            plt.legend()
+            # 顯示圖形
+            #plt.show()
+            if not os.path.exists(save_path + '\\' + str(fold)):
+                os.makedirs(save_path + '\\' + str(fold))
+            plt.savefig(save_path + '\\' + str(fold) + '\\figure2.png')
+            plt.clf()
+            plt.close('all')
+            #assert False
+            print( training_accuracy[-1], valid_accuracy[-1])
+            print( type(train_acc_), type(valid_acc_)) 
+            return total_train_loss, total_valid_loss, training_accuracy, valid_accuracy,specificity,sensitivity,ppv,npv,auc
+
+        #assert os.path.exists(train_path), "dataset train_path: {} does not exist.".format(train_path)
+        # 遍历文件夹，一个文件夹对应一个类别
+        flower_class = [cla for cla in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, cla))]
+        print(flower_class)
+        # 排序，保证顺序一致
+        flower_class.sort()
+        # 生成类别名称以及对应的数字索引
+        class_indices = dict((k, v) for v, k in enumerate(flower_class))
+        
+        
+        json_str = json.dumps(dict((val, key) for key, val in class_indices.items()), indent=4)
+        with open('class_indices.json', 'w') as json_file:
+            json_file.write(json_str)
+
+
+        transform = transforms.Compose([
+            transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize([0.5]*3, [0.5]*3)
+        ]) # test transform
+
+        dataset = torchvision.datasets.ImageFolder(root=data_path,transform=transform)
+
+        num_classes = (len(class_indices))
+
+
+        warnings.filterwarnings('ignore')
+
+        CUDA = torch.cuda.is_available()
+        device = torch.device("cuda" if CUDA else "cpu")
+        
+
+        model =model_choose(model_name, num_classes, pretrain)
+        if CUDA:
+            model = model.cuda()
+        criterion = nn.CrossEntropyLoss()
+        seconds = time.time()
+        splits=KFold(n_splits=self.K,shuffle=True,random_state=42)
+        for fold, (train_idx,val_idx) in enumerate(splits.split(np.arange(len(dataset)))):
+            print('Fold {}'.format(fold + 1))
+            from torch.utils.data import Dataset, DataLoader,TensorDataset,random_split,SubsetRandomSampler, ConcatDataset
+            train_sampler = SubsetRandomSampler(train_idx)
+            test_sampler = SubsetRandomSampler(val_idx)
+            train_loader = DataLoader(dataset, batch_size=batch_size, sampler=train_sampler)
+            valid_loader = DataLoader(dataset, batch_size=batch_size, sampler=test_sampler)
+
+
+            #詳細訓練資料路徑
+            csv_name =save_path + '\\'+'output.csv'
+
+            total_train_loss, total_valid_loss, total_train_accuracya, total_valid_accuracyb,specificity,sensitivity,ppv,npv,auc = training_loop(model, criterion, train_loader, valid_loader,seconds,csv_name,num_epochs,batch_size,fold,save_path)
+            print(time.ctime(seconds))
+            torch.save(model, save_path + '\\'+str(fold)+".pth")
+
+            a = total_train_accuracya
+            b=  total_valid_accuracyb
+            return a,b,specificity,sensitivity,ppv,npv,auc
+
+
     def auto_train(self):
         '''
         自動建立資料夾，自動訓練各種不同組合的model。
         '''
-        # 使用默认参数创建summary writer，程序将会自动生成文件名
-        writer = SummaryWriter()
-        # 生成的文件路径为: runs_0419_rp5/Dec16_21-13-54_DESKTOP-E782FS1/
-
-        # 创建summary writer时，指定文件路径
-        writer = SummaryWriter("my_experiment")
-        # 生成的文件路径为: my_experiment
-
-        # 创建summary writer时，使用comment作为后缀
-        writer = SummaryWriter(comment="LR_0.1_BATCH_16")
-
-        writer = SummaryWriter('runs_0419_rp5')
-
         #----------------------------------------
         #----訓練前準備
+        # 建立資料夾並列印檢索結果標頭
         #----------------------------------------
         save_path = self.save_path
         for train_type in range(len(self.train_typee)):
@@ -670,10 +1220,18 @@ class CBMIR():
                                        
         #----------------------------------------
         #-----開始訓練
+        # 訓練並印出訓練細節
         #----------------------------------------
+
+        # 這段程式碼初始化了三個迴圈，
+        # 分別迭代不同的超參數值，例如訓練類型、模型清單和路徑清單。
+        # train_typee、model_listt和path_listt是包含這些超參數不同值的清單。
         for train_type in range(len(self.train_typee)):
             for model_list in range(len(self.model_listt)):
                 for path_list in range(len(self.path_listt)):
+                    # 這裡的程式碼初始化了五個變數，
+                    # 用於存儲平均訓練準確度、平均測試準確度、平均特異度、平均靈敏度和平均曲線下面積（AUC）。
+                    # 這些變數將在訓練模型後用於計算這些指標的平均值。
                     avg_train_acc = 0
                     avg_test_acc = 0
                     avg_specificity = 0
@@ -682,29 +1240,32 @@ class CBMIR():
 
                     #計時開始
                     seconds = time.time()
+                    # 這段程式碼對於迭代的每一組超參數，使用五個指標來計算模型的平均表現。
+                    # 在訓練和測試期間，先將 pretrain 設置為 True 或 False，
+                    # 具體取決於 train_typee 變數是否等於 'finetune'。
+                    # 此外，還需設置其他變數，如訓練和測試數據集的路徑，以及保存模型的路徑。
+                    # 然後，該函數 train_model() 會使用這些變數來訓練模型，並返回五個指標的值。
                     for k in range(self.K):
-                        # pretrain = True if self.train_typee[train_type] =='finetune' else False
+                        pretrain = True if self.train_typee[train_type] =='finetune' else False
         
-                        # save_pathh = save_path + '\\'+ self.train_typee[train_type]+'\\'+self.path_listt[path_list] + '\\'+self.model_listt[model_list]
-                        # train_path = 'input_data\\' +self.path_listt[path_list] +'\\fold' + str(k) + '\\train'
+                        save_pathh = save_path + '\\'+ self.train_typee[train_type]+'\\'+self.path_listt[path_list] + '\\'+self.model_listt[model_list]
+                        train_path = 'input_data\\' +self.path_listt[path_list] +'\\fold' + str(k) + '\\train'
                         test_path = 'input_data\\' +self.path_listt[path_list] +'\\fold' + str(k) + '\\test' 
                         
-                        # total_train_accuracy, total_valid_accuracy,specificity,sensitivity,ppv,npv,auc = self.train_model(self.model_listt[model_list],self.num_epochs,self.batch_size,pretrain,train_path,test_path,save_pathh,k)
-                        # avg_train_acc += float(total_train_accuracy[-1])/(self.K)
-                        # avg_test_acc += float(total_valid_accuracy[-1])/(self.K)
-                        # avg_specificity += float(specificity[-1])/(self.K)
-                        # avg_sensitivity += float(sensitivity[-1])/(self.K)
-                        # avg_auc+= float(auc[-1])/(self.K)
+                        total_train_accuracy, total_valid_accuracy,specificity,sensitivity,ppv,npv,auc = self.train_model(self.model_listt[model_list],self.num_epochs,self.batch_size,pretrain,train_path,test_path,save_pathh,k)
+                        avg_train_acc += float(total_train_accuracy[-1])/(self.K)
+                        avg_test_acc += float(total_valid_accuracy[-1])/(self.K)
+                        avg_specificity += float(specificity[-1])/(self.K)
+                        avg_sensitivity += float(sensitivity[-1])/(self.K)
+                        avg_auc+= float(auc[-1])/(self.K)
                         
                         #輸出機率
                         self.probability_compute(test_path,save_pathh+'\\'+str(k)+'.pth',save_pathh+'\\'+str(k)+'\\'+str(k)+'_output.csv')
-                       
                        
                        #繪製混淆矩陣
                         self.draw_confusion_atrix(test_path,
                                             save_pathh+'\\'+str(k)+'.pth'
                                             ,save_pathh+'\\'+str(k)+'\\'+str(k))   
-                         
                         #資料可視化
                         writer = SummaryWriter('runs_0419_rp5/'+str(self.train_typee[train_type])
                                                   +'_'+str(self.model_listt[model_list])
@@ -712,7 +1273,7 @@ class CBMIR():
                                                   +'_'+str(self.K)
                                                   +'_'+str(self.repeat_times)
                                                 )
-                        continue
+                        #continue
                         for n_iter in range(self.num_epochs):
                             writer.add_scalar('auc/auc_fold'+str(k),float(auc[n_iter]), n_iter)
                             writer.add_scalar('npv/npv_fold'+str(k),float(npv[n_iter]), n_iter)
@@ -724,6 +1285,7 @@ class CBMIR():
                         writer.close()
                     
                     #計時結束
+                    #計算時間
                     now_time = int(time.time()-seconds)
                     hr = 0
                     mi = 0
@@ -775,7 +1337,7 @@ class CBMIR():
                         import time                        
                         seconds = time.time()
                         timee = ''
-                        for k in range(self.K):
+                        for k in range(1,self.K):
                             if self.train_typee[train_type] == "trainFromScratch":
                                 save_pathh = self.save_path + '\\retrieve_trainFromScratch'+'\\'+self.path_listt[path_list] + '\\'+self.model_listt[model_list] + '\\fold' + str(k) 
                                 #continue
@@ -958,7 +1520,7 @@ class CBMIR():
             ])
 
             # use path open image
-            img = Image.open(img_path)
+            img = Image.open(img_path)#.convert('RGB')
             img = transform(img)
 
             #通道多一條
@@ -1052,7 +1614,7 @@ class CBMIR():
                         transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize([0.5]*3, [0.5]*3)
                 ]) 
 
-                img = Image.open(img_path)
+                img = Image.open(img_path)#.convert('RGB')
                 img = transform(img)
                 img = torch.unsqueeze(img, dim=0)
                 CUDA = torch.cuda.is_available()
@@ -1121,7 +1683,7 @@ class CBMIR():
                     transforms.Resize((224, 224)), transforms.ToTensor(), transforms.Normalize([0.5]*3, [0.5]*3)
             ]) 
 
-            img = Image.open(img_path)
+            img = Image.open(img_path)#.convert('RGB')
             img = transform(img)
             img = torch.unsqueeze(img, dim=0)
             CUDA = torch.cuda.is_available()
@@ -1715,7 +2277,7 @@ class CBMIR():
                     ]) # test transform
                     img_path = img_path
                     assert os.path.exists(img_path), "file: '{}' dose not exist.".format(img_path)
-                    img = Image.open(img_path)
+                    img = Image.open(img_path)#.convert('RGB')
                     
                     img = transform(img)
                     img = torch.unsqueeze(img, dim=0)
@@ -1778,6 +2340,7 @@ class CBMIR():
         predict(path,model_path)
      #
     
+
     def draw_confusion_atrix(self,path,model_path,confusion_atrix_save):
         # 設定隨機種子以確保可重複性
         torch.manual_seed(42)
@@ -1818,7 +2381,7 @@ class CBMIR():
                     ]) # test transform
                     img_path = img_path
                     assert os.path.exists(img_path), "file: '{}' dose not exist.".format(img_path)
-                    img = Image.open(img_path)
+                    img = Image.open(img_path)#.convert('RGB')
                     
                     img = transform(img)
                     img = torch.unsqueeze(img, dim=0)
@@ -1900,19 +2463,17 @@ class CBMIR():
 # cb.K = 5
 # cb.foldd('data')
 # print(asd)
-for i in range(1,2):
+for i in range(1):
     cb = CBMIR(i)
     cb.data_path = " input_data\\" 
     cb.repeat_times = i
-    cb.save_path="S_8_"+str(i)
+    cb.save_path="x"+str(i)
     cb.train_typee = ['finetune']
-    cb.model_listt=['vit']
+    cb.model_listt=['densenet']
     cb.path_listt=['S']
     cb.num_epochs =1
     cb.batch_size = 16
     cb.top_list = [10]
     cb.K = 5
-    cb.probability_compute(path ='query_data\\S',model_path='S_8_1\\finetune\S\\vit\\0.pth', probability_save='result/prob.csv')
-    # cb.auto_train()
-    # cb.retireve()
-#fin
+    cb.auto_train()
+    cb.retireve()
